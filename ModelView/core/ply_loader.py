@@ -1,17 +1,17 @@
 """
 PLY模型加载器
-支持所有类型的PLY格式（ASCII和二进制）
+支持ASCII和二进制PLY格式，包括带纹理的PLY
 """
 
 import struct
 import os
-import re
+import numpy as np
 from typing import Optional, List
 from core.base_loader import BaseModelLoader, ModelData
 
 
 class PLYLoader(BaseModelLoader):
-    """PLY格式模型加载器 - 通用版"""
+    """PLY格式模型加载器"""
 
     def supports_format(self, extension: str) -> bool:
         return extension.lower() == '.ply'
@@ -25,6 +25,7 @@ class PLYLoader(BaseModelLoader):
 
         try:
             with open(file_path, 'rb') as f:
+                # 读取头部
                 header = self._read_header(f)
                 if header is None:
                     return None
@@ -32,27 +33,38 @@ class PLYLoader(BaseModelLoader):
                 model = ModelData()
                 model.format = "PLY"
                 model.name = os.path.basename(file_path)
+                model.texture_path = header.get('texture_file', '')
+
+                print(f"[PLY] format={header['format']}, vertices={header['vertex_count']}, faces={header['face_count']}")
+                print(f"[PLY] vertex_props: {header['vertex_props']}")
 
                 if header['is_binary']:
                     self._parse_binary(f, model, header)
                 else:
                     self._parse_ascii(f, model, header)
 
+                print(f"[PLY] loaded {len(model.vertices)} vertices, {len(model.triangles)} triangles")
                 return model
 
         except Exception as e:
             print(f"PLY load error: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     def _read_header(self, file) -> dict:
-        """读取并解析PLY头部"""
+        """读取PLY头部"""
         header = {
+            'format': 'ascii',
             'is_binary': False,
             'vertex_count': 0,
             'face_count': 0,
-            'properties': [],  # 每个属性的名称和类型
-            'format': 'ascii'
+            'vertex_props': [],  # [(type, name), ...]
+            'face_props': [],
+            'texture_file': ''
         }
+
+        current_element = None
 
         while True:
             line = file.readline()
@@ -64,200 +76,53 @@ class PLYLoader(BaseModelLoader):
             else:
                 line = line.strip()
 
+            # 解析格式
             if line.startswith('format'):
                 parts = line.split()
-                if len(parts) >= 3:
+                if len(parts) >= 2:
                     header['format'] = parts[1]
                     header['is_binary'] = 'binary' in parts[1].lower()
+
+            # 解析注释中的纹理文件
+            elif line.startswith('comment TextureFile'):
+                parts = line.split()
+                if len(parts) >= 3:
+                    header['texture_file'] = parts[2]
+
+            # 解析顶点数量
             elif line.startswith('element vertex'):
                 parts = line.split()
                 if len(parts) >= 3:
                     header['vertex_count'] = int(parts[2])
+                    current_element = 'vertex'
+
+            # 解析面数量
             elif line.startswith('element face'):
                 parts = line.split()
                 if len(parts) >= 3:
                     header['face_count'] = int(parts[2])
+                    current_element = 'face'
+
+            # 解析属性
             elif line.startswith('property'):
-                header['properties'].append(line)
+                parts = line.split()
+                if current_element == 'vertex' and len(parts) >= 3:
+                    # property float x 或 property float32 x
+                    prop_type = parts[1]
+                    prop_name = parts[2]
+                    header['vertex_props'].append((prop_type, prop_name))
+                elif current_element == 'face':
+                    header['face_props'].append(line)
+
+            # 头部结束
             elif line == 'end_header':
                 break
 
         return header
 
-    def _parse_ascii(self, file, model, header):
-        """解析ASCII格式PLY"""
-        vertices = []
-        colors = []
-        normals = []
-        texcoords = []
-        triangles = []
-
-        # 解析每个顶点的属性位置
-        prop_map = {}
-        for i, prop in enumerate(header['properties']):
-            prop = prop.lower()
-            parts = prop.split()
-            if len(parts) >= 3:
-                prop_name = parts[2]
-                if 'x' == prop_name or 'y' == prop_name or 'z' == prop_name:
-                    prop_map['vertex_xyz'] = i
-                elif 'nx' == prop_name or 'ny' == prop_name or 'nz' == prop_name:
-                    prop_map.setdefault('normals', []).append(i)
-                elif prop_name in ('red', 'green', 'blue', 'alpha'):
-                    prop_map.setdefault('colors', []).append(i)
-                elif prop_name in ('s', 't', 'u', 'v'):
-                    prop_map.setdefault('texcoords', []).append(i)
-
-        vertex_xyz_idx = prop_map.get('vertex_xyz', -1)
-        color_idx = prop_map.get('colors', [])
-        normal_idx = prop_map.get('normals', [])
-
-        # 读取顶点
-        for _ in range(header['vertex_count']):
-            line = file.readline()
-            if isinstance(line, bytes):
-                line = line.decode('utf-8', errors='ignore')
-            parts = line.strip().split()
-
-            if vertex_xyz_idx >= 0 and vertex_xyz_idx + 2 < len(parts):
-                x = float(parts[vertex_xyz_idx])
-                y = float(parts[vertex_xyz_idx + 1])
-                z = float(parts[vertex_xyz_idx + 2])
-                vertices.append([x, y, z])
-
-                # 颜色
-                if color_idx and len(color_idx) >= 3:
-                    try:
-                        r = float(parts[color_idx[0]]) / 255.0 if float(parts[color_idx[0]]) > 1 else float(parts[color_idx[0]])
-                        g = float(parts[color_idx[1]]) / 255.0 if float(parts[color_idx[1]]) > 1 else float(parts[color_idx[1]])
-                        b = float(parts[color_idx[2]]) / 255.0 if float(parts[color_idx[2]]) > 1 else float(parts[color_idx[2]])
-                        colors.append([r, g, b])
-                    except:
-                        pass
-
-        # 读取面
-        for _ in range(header['face_count']):
-            line = file.readline()
-            if isinstance(line, bytes):
-                line = line.decode('utf-8', errors='ignore')
-            parts = line.strip().split()
-
-            if parts:
-                n = int(parts[0])
-                if n >= 3 and len(parts) >= n + 1:
-                    face = [int(parts[i + 1]) for i in range(n)]
-                    if n == 3:
-                        triangles.append(face)
-                    else:
-                        # 三角化
-                        for i in range(1, n - 1):
-                            triangles.append([face[0], face[i], face[i + 1]])
-
-        model.vertices = vertices
-        model.triangles = triangles
-        model.colors = colors
-        model.normals = normals if normals else self._compute_normals(vertices, triangles)
-        model.texcoords = texcoords
-
-    def _parse_binary(self, file, model, header):
-        """解析二进制格式PLY"""
-        vertices = []
-        colors = []
-        normals = []
-        texcoords = []
-        triangles = []
-
-        # 计算每个顶点的字节大小
-        vertex_size = 0
-        prop_types = {}
-
-        # 简化处理：假设标准属性顺序
-        for prop in header['properties']:
-            parts = prop.lower().split()
-            if len(parts) >= 3:
-                ptype = parts[1]
-                pname = parts[2]
-                size = self._get_type_size(ptype)
-                if size > 0:
-                    prop_types[pname] = (ptype, size)
-                    vertex_size += size
-
-        # 读取顶点
-        for _ in range(header['vertex_count']):
-            data = file.read(vertex_size)
-            offset = 0
-
-            x = y = z = 0.0
-            has_xyz = False
-
-            for pname, (ptype, size) in prop_types.items():
-                value = self._read_value(data, offset, ptype)
-                offset += size
-
-                if pname == 'x':
-                    x = value
-                    has_xyz = True
-                elif pname == 'y':
-                    y = value
-                elif pname == 'z':
-                    z = value
-                elif pname in ('nx', 'ny', 'nz'):
-                    normals.append([value if pname == 'nx' else 0,
-                                   value if pname == 'ny' else 0,
-                                   value if pname == 'nz' else 0])
-                elif pname in ('red', 'green', 'blue'):
-                    # 延迟处理颜色
-                    pass
-
-            if has_xyz:
-                vertices.append([x, y, z])
-
-                # 尝试提取颜色
-                r = g = b = 0.7
-                if 'red' in prop_types and 'green' in prop_types and 'blue' in prop_types:
-                    r_off, r_type = prop_types['red'][1], prop_types['red'][0]
-                    g_off, g_type = prop_types['green'][1], prop_types['green'][0]
-                    b_off, b_type = prop_types['blue'][1], prop_types['blue'][0]
-                    r = self._read_value(data, r_off, r_type)
-                    g = self._read_value(data, g_off, g_type)
-                    b = self._read_value(data, b_off, b_type)
-                    if r > 1 or g > 1 or b > 1:
-                        r, g, b = r / 255.0, g / 255.0, b / 255.0
-                colors.append([r, g, b])
-
-        # 读取面
-        for _ in range(header['face_count']):
-            n_byte = file.read(1)
-            if not n_byte:
-                break
-            n = struct.unpack('B', n_byte)[0]
-
-            if header['format'] == 'binary_big_endian':
-                face_data = file.read(n * 4)
-                fmt = '>' + 'I' * n
-                indices = struct.unpack(fmt, face_data)
-            else:
-                face_data = file.read(n * 4)
-                fmt = '<' + 'I' * n
-                indices = struct.unpack(fmt, face_data)
-
-            if n >= 3:
-                indices = list(indices)
-                if n == 3:
-                    triangles.append(indices)
-                else:
-                    for i in range(1, n - 1):
-                        triangles.append([indices[0], indices[i], indices[i + 1]])
-
-        model.vertices = vertices
-        model.triangles = triangles
-        model.colors = colors
-        model.normals = normals if normals else self._compute_normals(vertices, triangles)
-        model.texcoords = texcoords
-
-    def _get_type_size(self, ptype):
+    def _get_type_size(self, ptype: str) -> int:
         """获取PLY数据类型的字节大小"""
-        type_sizes = {
+        type_map = {
             'char': 1, 'int8': 1,
             'uchar': 1, 'uint8': 1,
             'short': 2, 'int16': 2,
@@ -267,30 +132,172 @@ class PLYLoader(BaseModelLoader):
             'float': 4, 'float32': 4,
             'double': 8, 'float64': 8
         }
-        return type_sizes.get(ptype.lower(), 0)
+        return type_map.get(ptype.lower(), 0)
 
-    def _read_value(self, data, offset, ptype):
-        """从二进制数据中读取值"""
-        size = self._get_type_size(ptype)
-        if size == 0 or offset + size > len(data):
-            return 0.0
+    def _parse_ascii(self, file, model, header):
+        """解析ASCII格式PLY"""
+        vertices = []
+        colors = []
+        triangles = []
 
-        chunk = data[offset:offset + size]
-        ptype = ptype.lower()
+        vertex_count = header['vertex_count']
+        face_count = header['face_count']
+        vertex_props = header['vertex_props']
 
-        if ptype in ('char', 'int8', 'uchar', 'uint8'):
-            return struct.unpack('B', chunk)[0]
-        elif ptype in ('short', 'int16'):
-            return struct.unpack('<h', chunk)[0]
-        elif ptype in ('ushort', 'uint16'):
-            return struct.unpack('<H', chunk)[0]
-        elif ptype in ('int', 'int32'):
-            return struct.unpack('<i', chunk)[0]
-        elif ptype in ('uint', 'uint32'):
-            return struct.unpack('<I', chunk)[0]
-        elif ptype in ('float', 'float32'):
-            return struct.unpack('<f', chunk)[0]
-        elif ptype in ('double', 'float64'):
-            return struct.unpack('<d', chunk)[0]
+        # 找出x,y,z和颜色的位置
+        x_idx = y_idx = z_idx = -1
+        r_idx = g_idx = b_idx = -1
 
-        return 0.0
+        for i, (ptype, pname) in enumerate(vertex_props):
+            if pname == 'x': x_idx = i
+            elif pname == 'y': y_idx = i
+            elif pname == 'z': z_idx = i
+            elif pname == 'red' or pname == 'r': r_idx = i
+            elif pname == 'green' or pname == 'g': g_idx = i
+            elif pname == 'blue' or pname == 'b': b_idx = i
+
+        # 读取顶点
+        for i in range(vertex_count):
+            line = file.readline()
+            if isinstance(line, bytes):
+                line = line.decode('utf-8', errors='ignore')
+            parts = line.strip().split()
+
+            if len(parts) >= 3:
+                x = float(parts[x_idx]) if x_idx >= 0 and x_idx < len(parts) else 0.0
+                y = float(parts[y_idx]) if y_idx >= 0 and y_idx < len(parts) else 0.0
+                z = float(parts[z_idx]) if z_idx >= 0 and z_idx < len(parts) else 0.0
+                vertices.append([x, y, z])
+
+                # 颜色
+                if r_idx >= 0 and g_idx >= 0 and b_idx >= 0:
+                    if r_idx < len(parts) and g_idx < len(parts) and b_idx < len(parts):
+                        r = float(parts[r_idx])
+                        g = float(parts[g_idx])
+                        b = float(parts[b_idx])
+                        # 归一化
+                        if r > 1 or g > 1 or b > 1:
+                            r, g, b = r/255.0, g/255.0, b/255.0
+                        colors.append([r, g, b])
+
+        # 读取面
+        for i in range(face_count):
+            line = file.readline()
+            if isinstance(line, bytes):
+                line = line.decode('utf-8', errors='ignore')
+            parts = line.strip().split()
+
+            if parts:
+                n = int(parts[0])
+                if n >= 3 and len(parts) >= n + 1:
+                    face = [int(parts[j + 1]) for j in range(n)]
+                    # 三角化
+                    for j in range(1, n - 1):
+                        triangles.append([face[0], face[j], face[j + 1]])
+
+        model.vertices = vertices
+        model.triangles = triangles
+        model.colors = colors if colors else None
+        if vertices:
+            model.normals = self._compute_normals(vertices, triangles) if triangles else None
+
+    def _parse_binary(self, file, model, header):
+        """解析二进制格式PLY"""
+        vertices = []
+        colors = []
+        triangles = []
+
+        vertex_count = header['vertex_count']
+        face_count = header['face_count']
+        vertex_props = header['vertex_props']
+        is_big_endian = header['format'] == 'binary_big_endian'
+        endian = '>' if is_big_endian else '<'
+
+        # 计算顶点大小和属性偏移
+        vertex_size = 0
+        prop_offsets = []
+        for ptype, pname in vertex_props:
+            size = self._get_type_size(ptype)
+            prop_offsets.append((pname, vertex_size, ptype))
+            vertex_size += size
+
+        print(f"[PLY] vertex_size={vertex_size}, props={len(vertex_props)}")
+
+        # 读取顶点
+        for i in range(vertex_count):
+            data = file.read(vertex_size)
+            if len(data) < vertex_size:
+                print(f"[PLY] vertex read incomplete at {i}")
+                break
+
+            x = y = z = 0.0
+            r = g = b = 0.7
+
+            for pname, offset, ptype in prop_offsets:
+                size = self._get_type_size(ptype)
+                chunk = data[offset:offset+size]
+
+                if ptype in ('float', 'float32'):
+                    val = struct.unpack(endian + 'f', chunk)[0]
+                elif ptype in ('double', 'float64'):
+                    val = struct.unpack(endian + 'd', chunk)[0]
+                elif ptype in ('uchar', 'uint8'):
+                    val = struct.unpack('B', chunk)[0]
+                else:
+                    val = 0.0
+
+                if pname == 'x': x = val
+                elif pname == 'y': y = val
+                elif pname == 'z': z = val
+                elif pname in ('red', 'r'): r = val
+                elif pname in ('green', 'g'): g = val
+                elif pname in ('blue', 'b'): b = val
+
+            vertices.append([x, y, z])
+
+            # 颜色归一化
+            has_color = any(p[0] in ('red', 'r', 'green', 'g', 'blue', 'b') for p in prop_offsets)
+            if has_color:
+                if r > 1 or g > 1 or b > 1:
+                    r, g, b = r/255.0, g/255.0, b/255.0
+                colors.append([r, g, b])
+
+        # 读取面
+        # 格式: uint8 n, n个uint32索引, [可选: uint8 texcoord_count, texcoord_count个float32]
+        for i in range(face_count):
+            # 读取顶点数量
+            n_byte = file.read(1)
+            if len(n_byte) < 1:
+                break
+            n = struct.unpack('B', n_byte)[0]
+
+            # 读取顶点索引
+            indices_data = file.read(n * 4)
+            if len(indices_data) < n * 4:
+                break
+
+            fmt = endian + 'I' * n
+            indices = list(struct.unpack(fmt, indices_data))
+
+            # 三角化
+            if n >= 3:
+                for j in range(1, n - 1):
+                    triangles.append([indices[0], indices[j], indices[j + 1]])
+
+            # 读取纹理坐标（如果有）
+            # property list uint8 float32 texcoord
+            has_texcoord = any('texcoord' in p for p in header['face_props'])
+            if has_texcoord:
+                try:
+                    tc_n_byte = file.read(1)
+                    if len(tc_n_byte) == 1:
+                        tc_n = struct.unpack('B', tc_n_byte)[0]
+                        file.read(tc_n * 4)  # 跳过纹理坐标
+                except:
+                    pass
+
+        model.vertices = vertices
+        model.triangles = triangles
+        model.colors = colors if colors else None
+        if vertices:
+            model.normals = self._compute_normals(vertices, triangles) if triangles else None
