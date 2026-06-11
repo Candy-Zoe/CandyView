@@ -1,3 +1,5 @@
 numpy==1.26.4
+PyQt5==5.15.10
+PyOpenGL==3.1.6
+pygltflib==1.16.1
 open3d==0.18.0
-pillow==10.2.0
