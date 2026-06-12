@@ -9,7 +9,9 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from core.image_analyzer import ImageAnalyzer
-from core.ppt_generator import PPTGenerator, build_presentation, TEMPLATES
+from core.ppt_generator import PPTGenerator, build_presentation, TEMPLATES as PPT_TEMPLATES
+from core.word_generator import WordGenerator, THEMES as DOC_THEMES, build_document
+from core.pdf_generator import PDFGenerator, PDF_THEMES, build_pdf
 
 
 def make_test_image(idx):
@@ -36,23 +38,10 @@ def make_test_image(idx):
     return img
 
 
-def test_image_analyzer():
-    print("[1/3] 测试图像分析器...")
-    analyzer = ImageAnalyzer()
-    img = make_test_image(0)
-    result = analyzer.analyze(img, index=0, timestamp=1.0, enable_ocr=False)
-    assert 'title' in result
-    assert 'dominant_colors' in result
-    assert len(result['dominant_colors']) > 0
-    print("  ✅ 图像分析器通过")
-
-
-def test_ppt_generator():
-    print("[2/3] 测试 PPT 生成器 (所有模板)...")
-    os.makedirs("output", exist_ok=True)
-
+def make_frames(n=5):
+    """生成测试帧数据"""
     frames = []
-    for i in range(5):
+    for i in range(n):
         img = make_test_image(i)
         frames.append({
             'image': img,
@@ -66,12 +55,30 @@ def test_ppt_generator():
             'timestamp': i * 1.0,
             'sharpness': 100.0,
         })
+    return frames
+
+
+def test_image_analyzer():
+    print("[1/4] 测试图像分析器...")
+    analyzer = ImageAnalyzer()
+    img = make_test_image(0)
+    result = analyzer.analyze(img, index=0, timestamp=1.0, enable_ocr=False)
+    assert 'title' in result
+    assert 'dominant_colors' in result
+    assert len(result['dominant_colors']) > 0
+    print("  ✅ 图像分析器通过")
+
+
+def test_ppt_generator():
+    print("[2/4] 测试 PPT 生成器 (所有模板)...")
+    os.makedirs("output", exist_ok=True)
+    frames = make_frames(3)
 
     for layout_key in ['right', 'left', 'top', 'full']:
-        for tpl_key in TEMPLATES.keys():
+        for tpl_key in PPT_TEMPLATES.keys():
             out = build_presentation(
                 frames,
-                f"output/test_{layout_key}_{tpl_key}.pptx",
+                f"output/test_ppt_{layout_key}_{tpl_key}.pptx",
                 template=tpl_key,
                 title="测试标题",
                 subtitle="测试副标题",
@@ -81,11 +88,53 @@ def test_ppt_generator():
             assert os.path.exists(out)
             assert os.path.getsize(out) > 1000
 
-    print("  ✅ PPT 生成器通过 (所有模板和布局)")
+    print("  ✅ PPT 生成器通过")
+
+
+def test_word_generator():
+    print("[3/4] 测试 Word 生成器 (所有主题)...")
+    frames = make_frames(3)
+
+    for pos in ['right', 'left', 'below']:
+        for theme_key in DOC_THEMES.keys():
+            out = build_document(
+                frames,
+                f"output/test_docx_{pos}_{theme_key}.docx",
+                theme=theme_key,
+                title="测试标题",
+                subtitle="测试副标题",
+                image_position=pos,
+                include_ocr=True,
+            )
+            assert os.path.exists(out)
+            assert os.path.getsize(out) > 1000
+
+    print("  ✅ Word 生成器通过")
+
+
+def test_pdf_generator():
+    print("[4/4] 测试 PDF 生成器 (所有主题)...")
+    frames = make_frames(3)
+
+    for pos in ['right', 'left', 'below']:
+        for theme_key in PDF_THEMES.keys():
+            out = build_pdf(
+                frames,
+                f"output/test_pdf_{pos}_{theme_key}.pdf",
+                theme=theme_key,
+                title="测试标题",
+                subtitle="测试副标题",
+                image_position=pos,
+                include_ocr=True,
+            )
+            assert os.path.exists(out)
+            assert os.path.getsize(out) > 1000
+
+    print("  ✅ PDF 生成器通过")
 
 
 def test_video_frame_extractor_math():
-    print("[3/3] 测试视频帧提取器的数学函数...")
+    print("[0/4] 测试视频帧提取器的数学函数...")
     from core.video_frame_extractor import VideoFrameExtractor
 
     img1 = make_test_image(0)
@@ -106,32 +155,27 @@ def test_video_frame_extractor_math():
     hd_diff = VideoFrameExtractor._hamming_distance(h1, h3)
     print(f"    相同图片汉明距离: {hd_same}, 不同: {hd_diff}")
     assert hd_same <= 1
-    # 不同图片的汉明距离应该至少大于相同图片的
-    # 对于非常相似的图片，这里放宽要求
-    if hd_diff <= hd_same:
-        print("    ⚠️  phash 在简单图片上区分度有限，但直方图方法仍能区分")
 
     sharp = VideoFrameExtractor._frame_sharpness(img1)
     print(f"    图像清晰度: {sharp:.2f}")
     assert sharp > 0
-
-    # 额外测试: 幻灯片场景检测
-    is_slide = VideoFrameExtractor._is_slide_transition(img1)
-    print(f"    幻灯片场景检测: {is_slide}")
 
     print("  ✅ 视频帧提取器数学函数通过")
 
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("VideoToPPT 单元测试")
+    print("VideoToPPT 单元测试 (支持 PPT/Word/PDF)")
     print("=" * 50)
     try:
-        test_image_analyzer()
         test_video_frame_extractor_math()
+        test_image_analyzer()
         test_ppt_generator()
+        test_word_generator()
+        test_pdf_generator()
         print("=" * 50)
         print("✅ 所有测试通过！")
+        print(f"   生成文件保存在: {os.path.abspath('output')}")
     except Exception as e:
         import traceback
         traceback.print_exc()

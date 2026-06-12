@@ -17,13 +17,15 @@ from PyQt5.QtGui import QPixmap, QImage, QFont
 
 from core.video_frame_extractor import VideoFrameExtractor
 from core.image_analyzer import ImageAnalyzer
-from core.ppt_generator import PPTGenerator, TEMPLATES, build_presentation
+from core.ppt_generator import PPTGenerator, TEMPLATES as PPT_TEMPLATES, build_presentation
+from core.word_generator import WordGenerator, THEMES as DOC_THEMES, build_document
+from core.pdf_generator import PDFGenerator, PDF_THEMES, build_pdf
 
 
 class ConversionThread(QThread):
     """后台处理线程"""
     progress = pyqtSignal(int, str)
-    finished_ok = pyqtSignal(str, list)  # (输出路径, 帧列表)
+    finished_ok = pyqtSignal(str, list, str)  # (输出路径, 帧列表, 格式)
     error = pyqtSignal(str)
 
     def __init__(self, video_path, params):
@@ -35,6 +37,7 @@ class ConversionThread(QThread):
         try:
             video_path = self.video_path
             params = self.params
+            output_format = params.get('output_format', 'pptx')
 
             # 1. 提取帧
             self.progress.emit(3, "打开视频...")
@@ -82,29 +85,62 @@ class ConversionThread(QThread):
 
             extractor.close()
 
-            # 3. 生成 PPT
+            # 3. 根据格式生成文档
             output_dir = params.get('output_dir') or 'output'
             os.makedirs(output_dir, exist_ok=True)
-            output_path = os.path.join(output_dir, params.get('output_name', 'presentation.pptx'))
-            if not output_path.lower().endswith('.pptx'):
-                output_path += '.pptx'
 
-            def cb_ppt(percent, msg):
+            # 根据格式确定文件扩展名
+            ext_map = {'pptx': '.pptx', 'docx': '.docx', 'pdf': '.pdf'}
+            ext = ext_map.get(output_format, '.pptx')
+            default_name = f'presentation{ext}'
+            output_path = os.path.join(output_dir, params.get('output_name', default_name))
+            if not output_path.lower().endswith(ext):
+                output_path += ext
+
+            def cb_progress(percent, msg):
                 self.progress.emit(percent, msg)
 
-            build_presentation(
-                frames_with_analysis=analyzed,
-                output_path=output_path,
-                template=params['template'],
-                title=params['ppt_title'],
-                subtitle=params['ppt_subtitle'],
-                image_layout=params['image_layout'],
-                include_ocr=params['enable_ocr'],
-                progress_callback=cb_ppt,
-            )
+            # 选择对应的生成器
+            if output_format == 'docx':
+                image_pos = 'right' if params['image_layout'] in ('right', 'left') else 'below'
+                theme = params.get('doc_theme', 'modern')
+                build_document(
+                    frames_with_analysis=analyzed,
+                    output_path=output_path,
+                    theme=theme,
+                    title=params['ppt_title'],
+                    subtitle=params['ppt_subtitle'],
+                    image_position=image_pos,
+                    include_ocr=params['enable_ocr'],
+                    progress_callback=cb_progress,
+                )
+            elif output_format == 'pdf':
+                image_pos = 'right' if params['image_layout'] in ('right', 'left') else 'below'
+                theme = params.get('pdf_theme', 'modern')
+                build_pdf(
+                    frames_with_analysis=analyzed,
+                    output_path=output_path,
+                    theme=theme,
+                    title=params['ppt_title'],
+                    subtitle=params['ppt_subtitle'],
+                    image_position=image_pos,
+                    include_ocr=params['enable_ocr'],
+                    progress_callback=cb_progress,
+                )
+            else:  # pptx
+                build_presentation(
+                    frames_with_analysis=analyzed,
+                    output_path=output_path,
+                    template=params['template'],
+                    title=params['ppt_title'],
+                    subtitle=params['ppt_subtitle'],
+                    image_layout=params['image_layout'],
+                    include_ocr=params['enable_ocr'],
+                    progress_callback=cb_progress,
+                )
 
             self.progress.emit(100, "完成！")
-            self.finished_ok.emit(output_path, analyzed)
+            self.finished_ok.emit(output_path, analyzed, output_format)
 
         except Exception as e:
             traceback.print_exc()
@@ -250,16 +286,24 @@ class MainWindow(QMainWindow):
 
         tabs.addTab(tab2, "📝 内容识别")
 
-        # Tab3: PPT 模板
+        # Tab3: 导出设置
         tab3 = QWidget()
         tab3_layout = QFormLayout(tab3)
         tab3_layout.setContentsMargins(20, 20, 20, 20)
         tab3_layout.setSpacing(12)
 
-        self.template_combo = QComboBox()
-        for key, info in TEMPLATES.items():
-            self.template_combo.addItem(info['name'], key)
-        tab3_layout.addRow("PPT 模板:", self.template_combo)
+        # 导出格式选择
+        self.format_combo = QComboBox()
+        self.format_combo.addItem("PowerPoint (.pptx)", "pptx")
+        self.format_combo.addItem("Word 文档 (.docx)", "docx")
+        self.format_combo.addItem("PDF 文档 (.pdf)", "pdf")
+        self.format_combo.currentIndexChanged.connect(self._on_format_changed)
+        tab3_layout.addRow("导出格式:", self.format_combo)
+
+        # 样式选择（根据格式动态显示）
+        self.style_combo = QComboBox()
+        self._update_style_combo("pptx")
+        tab3_layout.addRow("文档样式:", self.style_combo)
 
         self.layout_combo = QComboBox()
         self.layout_combo.addItem("图文并排 - 图片在右侧", "right")
@@ -274,7 +318,7 @@ class MainWindow(QMainWindow):
         self.subtitle_edit = QLineEdit("由 VideoToPPT 自动生成")
         tab3_layout.addRow("封面副标题:", self.subtitle_edit)
 
-        self.output_name_edit = QLineEdit("presentation.pptx")
+        self.output_name_edit = QLineEdit("presentation")
         tab3_layout.addRow("输出文件名:", self.output_name_edit)
 
         self.output_dir_edit = QLineEdit(os.path.abspath("output"))
@@ -287,7 +331,7 @@ class MainWindow(QMainWindow):
         dir_wrap.setLayout(dir_row)
         tab3_layout.addRow("输出目录:", dir_wrap)
 
-        tabs.addTab(tab3, "🎨 PPT 样式")
+        tabs.addTab(tab3, "📄 导出设置")
 
         # 按钮区域
         btn_layout = QHBoxLayout()
@@ -358,6 +402,29 @@ class MainWindow(QMainWindow):
         if path:
             self.tesseract_path_edit.setText(path)
 
+    def _update_style_combo(self, fmt):
+        """根据导出格式更新样式下拉框"""
+        self.style_combo.blockSignals(True)
+        self.style_combo.clear()
+        if fmt == 'pptx':
+            for key, info in PPT_TEMPLATES.items():
+                self.style_combo.addItem(info['name'], key)
+        elif fmt == 'docx':
+            for key, info in DOC_THEMES.items():
+                self.style_combo.addItem(info['name'], key)
+        elif fmt == 'pdf':
+            for key, info in PDF_THEMES.items():
+                self.style_combo.addItem(info['name'], key)
+        self.style_combo.blockSignals(False)
+
+    def _on_format_changed(self, index):
+        """导出格式改变时触发"""
+        fmt = self.format_combo.currentData()
+        self._update_style_combo(fmt)
+        # 更新按钮文字
+        btn_texts = {'pptx': '🚀 开始生成 PPT', 'docx': '🚀 开始生成 Word', 'pdf': '🚀 开始生成 PDF'}
+        self.convert_btn.setText(btn_texts.get(fmt, '🚀 开始生成'))
+
     def _start_convert(self):
         path = self.input_edit.text().strip()
         if not path or not os.path.exists(path):
@@ -371,7 +438,8 @@ class MainWindow(QMainWindow):
         ocr_lang_map = {0: 'eng', 1: 'chi_sim', 2: 'eng+chi_sim'}
         ocr_lang = ocr_lang_map.get(self.ocr_lang.currentIndex(), 'eng')
 
-        template_key = self.template_combo.currentData() or 'modern'
+        output_format = self.format_combo.currentData() or 'pptx'
+        style_key = self.style_combo.currentData() or 'modern'
         image_layout = self.layout_combo.currentData() or 'right'
 
         params = {
@@ -383,11 +451,14 @@ class MainWindow(QMainWindow):
             'enable_ocr': self.enable_ocr.isChecked(),
             'ocr_lang': ocr_lang,
             'tesseract_cmd': self.tesseract_path_edit.text().strip() or None,
-            'template': template_key,
+            'output_format': output_format,
+            'template': style_key if output_format == 'pptx' else None,
+            'doc_theme': style_key if output_format == 'docx' else None,
+            'pdf_theme': style_key if output_format == 'pdf' else None,
             'image_layout': image_layout,
             'ppt_title': self.title_edit.text().strip() or '视频要点',
             'ppt_subtitle': self.subtitle_edit.text().strip(),
-            'output_name': self.output_name_edit.text().strip() or 'presentation.pptx',
+            'output_name': self.output_name_edit.text().strip() or 'presentation',
             'output_dir': self.output_dir_edit.text().strip() or 'output',
         }
 
@@ -406,16 +477,20 @@ class MainWindow(QMainWindow):
         self.progress.setValue(val)
         self.log_text.append(f"[{val:>3}%] {msg}")
 
-    def _on_finished(self, output_path, frames):
+    def _on_finished(self, output_path, frames, output_format='pptx'):
         self.last_output = output_path
         self.last_frames = frames
         self.convert_btn.setEnabled(True)
         self.open_btn.setEnabled(True)
         self.progress.setValue(100)
+
+        format_names = {'pptx': 'PPT', 'docx': 'Word 文档', 'pdf': 'PDF 文档'}
+        format_name = format_names.get(output_format, '文档')
+
         self.log_text.append(f"✅ 完成！共提取 {len(frames)} 帧")
         self.log_text.append(f"📄 输出文件: {output_path}")
         self.thumb_list.add_frames(frames)
-        QMessageBox.information(self, "成功", f"PPT 已生成！\n共 {len(frames)} 页\n\n{output_path}")
+        QMessageBox.information(self, "成功", f"{format_name} 已生成！\n共 {len(frames)} 页\n\n{output_path}")
 
     def _on_error(self, msg):
         self.convert_btn.setEnabled(True)
