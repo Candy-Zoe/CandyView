@@ -1,0 +1,10 @@
+numpy==1.26.4
+PyQt5==5.15.10
+opencv-python==4.9.0.80
+Pillow==10.2.0
+scipy==1.12.0
+python-pptx==1.0.0
+pytesseract==0.3.13
+python-Levenshtein==0.25.0
+# 可选：更好的OCR（需单独下载tesseract安装）
+# 可选：更智能的幻灯片生成（pip install transformers torch）
