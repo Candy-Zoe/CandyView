@@ -3,7 +3,7 @@ from .ply_loader import PLYLoader
 from .obj_loader import OBJLoader
 from .stl_loader import STLLoader
 from .gltf_loader import GLTFLoader
-from .model_loader import ModelLoader, ModelInfo
+from .model_loader import ModelLoader
 from .viewer_3d import Viewer3D
 
 __all__ = [
@@ -14,6 +14,5 @@ __all__ = [
     'STLLoader',
     'GLTFLoader',
     'ModelLoader',
-    'ModelInfo',
     'Viewer3D'
 ]

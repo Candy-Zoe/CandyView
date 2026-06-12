@@ -1,6 +1,9 @@
-PyQt5>=5.15
-opencv-python>=4.5
-numpy>=1.20
-Pillow>=9.0
-scipy>=1.6
-open3d>=0.15
+numpy==1.26.4
+PyQt5==5.15.10
+opencv-python==4.9.0.80
+Pillow==10.2.0
+scipy==1.12.0
+open3d==0.18.0
+# 可选：深度学习支持（最高质量）
+# pip install torch
+# pip install transformers

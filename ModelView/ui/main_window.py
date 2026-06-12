@@ -7,9 +7,9 @@ from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QMenuBar, QMenu, QAction, QFileDialog, QMessageBox,
     QTabWidget, QLabel, QStatusBar, QToolBar,
-    QSplitter, QFrame, QPushButton
+    QSplitter, QFrame, QPushButton, QProgressBar
 )
-from PyQt5.QtCore import Qt, pyqtSlot, QSize
+from PyQt5.QtCore import Qt, pyqtSlot, QSize, QThread, pyqtSignal
 from PyQt5.QtGui import QIcon, QKeySequence, QFont
 
 from ui.transform_panel import TransformPanel
@@ -18,15 +18,52 @@ from ui.info_panel import InfoPanel
 from core.model_loader import ModelLoader
 
 
+class LoadThread(QThread):
+    """模型加载线程"""
+    finished = pyqtSignal(object)
+    error = pyqtSignal(str)
+    progress = pyqtSignal(int, str)
+
+    def __init__(self, file_path):
+        super().__init__()
+        self.file_path = file_path
+
+    def run(self):
+        try:
+            self.progress.emit(10, "Loading model...")
+            
+            loader = ModelLoader()
+            model = loader.load(self.file_path)
+            
+            if model is None:
+                self.error.emit("Failed to load model")
+                return
+            
+            self.progress.emit(50, "Processing model...")
+            
+            if model.vertices:
+                self.progress.emit(80, "Computing normals...")
+                if not model.normals:
+                    model.compute_normals()
+            
+            self.progress.emit(100, "Complete")
+            self.finished.emit(model)
+            
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class MainWindow(QMainWindow):
     """主窗口类"""
 
     def __init__(self):
         super().__init__()
         self.current_file_path = None
+        self.current_model = None
         self._wireframe_enabled = False
         self._axes_enabled = True
         self._model_loaded = False
+        self._load_thread = None
         self._setup_ui()
         self._create_menu()
         self._create_toolbar()
@@ -132,6 +169,17 @@ class MainWindow(QMainWindow):
         )
         viewer_layout.addWidget(self.viewer_placeholder)
 
+        # 加载进度条
+        self.load_progress = QProgressBar()
+        self.load_progress.setStyleSheet("""
+            QProgressBar {
+                height: 25px;
+                margin: 10px;
+            }
+        """)
+        self.load_progress.hide()
+        viewer_layout.addWidget(self.load_progress)
+
         # 底部控制栏
         self.bottom_bar = QFrame()
         self.bottom_bar.setStyleSheet("background-color: #f0f0f0; border-top: 1px solid #ddd;")
@@ -147,6 +195,27 @@ class MainWindow(QMainWindow):
         bottom_layout.addStretch()
 
         # 控制按钮
+        self.view_model_btn = QPushButton("View Model")
+        self.view_model_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                border: none;
+                border-radius: 3px;
+                padding: 5px 15px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #1976D2;
+            }
+            QPushButton:disabled {
+                background-color: #ccc;
+            }
+        """)
+        self.view_model_btn.clicked.connect(self._on_view_model)
+        self.view_model_btn.setEnabled(False)
+        bottom_layout.addWidget(self.view_model_btn)
+
         self.clear_model_btn = QPushButton("Clear Model")
         self.clear_model_btn.setStyleSheet("""
             QPushButton {
@@ -308,9 +377,16 @@ class MainWindow(QMainWindow):
     @pyqtSlot()
     def _on_clear_model(self):
         """清除模型"""
+        # 取消正在加载的线程
+        if self._load_thread and self._load_thread.isRunning():
+            self._load_thread.quit()
+            self._load_thread.wait()
+
         self.current_file_path = None
+        self.current_model = None
         self._model_loaded = False
         self.viewer_placeholder.show()
+        self.load_progress.hide()
         self.file_info_label.setText("No model loaded")
         self.info_panel.set_placeholder()
         
@@ -379,25 +455,86 @@ class MainWindow(QMainWindow):
 
     def open_file(self, file_path: str):
         """
-        打开模型文件
+        异步打开模型文件
 
         Args:
             file_path: 文件路径
         """
+        # 取消正在加载的线程
+        if self._load_thread and self._load_thread.isRunning():
+            self._load_thread.quit()
+            self._load_thread.wait()
+
+        # 显示加载进度
+        self.viewer_placeholder.hide()
+        self.load_progress.show()
+        self.load_progress.setValue(0)
+
+        # 创建并启动加载线程
+        self._load_thread = LoadThread(file_path)
+        self._load_thread.finished.connect(self._on_load_finished)
+        self._load_thread.error.connect(self._on_load_error)
+        self._load_thread.progress.connect(self._on_load_progress)
+        self._load_thread.start()
+
+        # 更新UI状态
         self.current_file_path = file_path
+        self.statusbar.showMessage(f"Loading: {file_path}")
+
+    def _on_load_progress(self, value: int, message: str):
+        """加载进度回调"""
+        self.load_progress.setValue(value)
+        self.statusbar.showMessage(f"{message} ({value}%)")
+
+    def _on_load_finished(self, model):
+        """加载完成回调"""
+        self.load_progress.hide()
+        self.current_model = model
         self._model_loaded = True
-        
+
         # 更新UI状态
         self.update_ui_states(True)
-        
+
         # 更新文件信息
-        file_name = file_path.split('/')[-1] if '/' in file_path else file_path.split('\\')[-1]
+        file_name = self.current_file_path.split('/')[-1] if '/' in self.current_file_path else self.current_file_path.split('\\')[-1]
         self.file_info_label.setText(f"Loaded: {file_name}")
+
+        # 更新信息面板
+        self.info_panel.update_info(model)
+
+        self.statusbar.showMessage(f"Loaded: {file_name}")
+
+    def _on_load_error(self, error_msg: str):
+        """加载错误回调"""
+        self.load_progress.hide()
+        self.viewer_placeholder.show()
         
-        # 隐藏占位标签
-        self.viewer_placeholder.hide()
+        QMessageBox.critical(
+            self,
+            "Load Error",
+            f"Failed to load model:\n{error_msg}"
+        )
         
-        self.statusbar.showMessage(f"Loaded: {file_path}")
+        self.statusbar.showMessage("Load failed")
+        self.update_ui_states(False)
+
+    def _on_view_model(self):
+        """查看模型"""
+        if self.current_model is None:
+            return
+        
+        import threading
+        from core.viewer_3d import Viewer3D
+        
+        def run_viewer():
+            viewer = Viewer3D()
+            viewer.load_model(self.current_model)
+            viewer.create_window()
+            viewer.run()
+        
+        thread = threading.Thread(target=run_viewer)
+        thread.daemon = True
+        thread.start()
 
     def update_ui_states(self, model_loaded: bool):
         """更新UI控件状态"""
@@ -407,9 +544,15 @@ class MainWindow(QMainWindow):
         self.axes_action.setEnabled(model_loaded)
         self.reset_action.setEnabled(model_loaded)
         self.clear_model_btn.setEnabled(model_loaded)
+        self.view_model_btn.setEnabled(model_loaded)
 
     def closeEvent(self, event):
         """关闭事件"""
+        # 取消正在加载的线程
+        if self._load_thread and self._load_thread.isRunning():
+            self._load_thread.quit()
+            self._load_thread.wait()
+
         reply = QMessageBox.question(
             self,
             "Confirm Exit",

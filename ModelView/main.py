@@ -1,156 +1,292 @@
 """
 ModelView - 3D Model Viewer
 主程序入口
-使用PyOpenGL进行3D渲染
 """
 
 import sys
 import traceback
-from PyQt5.QtWidgets import QApplication, QMessageBox
+import os
+import threading
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
+    QPushButton, QLabel, QLineEdit, QFileDialog, QMessageBox,
+    QGroupBox, QFormLayout, QTextEdit, QSplitter, QFrame, QToolBar
+)
+from PyQt5.QtCore import Qt, QSize
+from PyQt5.QtGui import QKeySequence
 
-from ui.main_window import MainWindow
 from core.model_loader import ModelLoader
 
 
-class ModelViewerApp:
-    """3D模型查看器应用主类"""
+class ViewerThread(threading.Thread):
+    """3D查看器线程"""
 
-    def __init__(self):
-        self.app = QApplication(sys.argv)
-        self._setup_app_style()
-
-        self.main_window = MainWindow()
-        self.model_loader = ModelLoader()
-
-        self.current_model_data = None
-        self.current_info = None
-        self.viewer_thread = None
-
-        self._connect_signals()
-
-    def _setup_app_style(self):
-        """设置应用样式"""
-        self.app.setApplicationName("3D Model Viewer")
-        self.app.setApplicationVersion("1.0")
-        self.app.setStyle("Fusion")
-
-    def _connect_signals(self):
-        """连接信号槽"""
-        self.main_window.open_action.triggered.connect(self._on_open_file)
-        self.main_window.reload_action.triggered.connect(self._on_reload_file)
-        self.main_window.clear_action.triggered.connect(self._on_clear_model)
-        self.main_window.wireframe_action.triggered.connect(self._on_toggle_wireframe)
-        self.main_window.axes_action.triggered.connect(self._on_toggle_axes)
-        self.main_window.reset_action.triggered.connect(self._on_reset_view)
-        self.main_window.clear_model_btn.clicked.connect(self._on_clear_model)
-
-        self.main_window.transform_panel.load_clicked.connect(self._on_open_file)
-        self.main_window.transform_panel.reset_clicked.connect(self._on_reset_view)
-
-    def _on_open_file(self):
-        """打开文件对话框"""
-        from PyQt5.QtWidgets import QFileDialog
-
-        file_path, _ = QFileDialog.getOpenFileName(
-            self.main_window,
-            "Open 3D Model",
-            "",
-            ";;".join(self.model_loader.get_format_filters())
-        )
-
-        if file_path:
-            self.load_model(file_path)
-
-    def load_model(self, file_path: str):
-        """加载模型文件"""
-        try:
-            model_data, info = self.model_loader.load_model(file_path)
-
-            if model_data is not None:
-                self.current_model_data = model_data
-                self.current_info = info
-
-                self.main_window.info_panel.update_info({
-                    'format': info.format,
-                    'vertices': info.vertices,
-                    'triangles': info.triangles,
-                    'has_texture': info.has_texture,
-                    'has_vertex_colors': info.has_vertex_colors,
-                    'has_normals': info.has_normals,
-                    'bounding_box_min': info.bounding_box_min,
-                    'bounding_box_max': info.bounding_box_max,
-                    'bounding_box_size': info.bounding_box_size,
-                    'center': info.center,
-                    'file_path': info.file_path
-                })
-
-                self.main_window.open_file(file_path)
-
-                self._launch_viewer(model_data)
-
-            else:
-                QMessageBox.warning(self.main_window, "Load Failed", "Failed to load model file.")
-
-        except Exception as e:
-            QMessageBox.critical(self.main_window, "Error", f"Failed to load model:\n{str(e)}")
-            traceback.print_exc()
-
-    def _launch_viewer(self, model_data):
-        """启动3D查看器"""
-        import threading
-        
-        def run_viewer():
-            from core.viewer_3d import Viewer3D
-            
-            viewer = Viewer3D()
-            viewer.load_model(model_data)
-            viewer.create_window(width=950, height=720)
-            viewer.run()
-        
-        self.viewer_thread = threading.Thread(target=run_viewer)
-        self.viewer_thread.daemon = True
-        self.viewer_thread.start()
-
-    def _on_reload_file(self):
-        """重新加载当前文件"""
-        if self.main_window.current_file_path:
-            self.load_model(self.main_window.current_file_path)
-
-    def _on_clear_model(self):
-        """清除模型"""
-        self.current_model_data = None
-        self.current_info = None
-        self.viewer_thread = None
-        self.main_window._on_clear_model()
-
-    def _on_toggle_wireframe(self, checked: bool):
-        """切换线框模式"""
-        pass
-
-    def _on_toggle_axes(self, checked: bool):
-        """切换坐标轴显示"""
-        pass
-
-    def _on_reset_view(self):
-        """重置视图"""
-        self.main_window.transform_panel.reset_all_sliders()
-        self.main_window.measure_panel.clear_measurements()
+    def __init__(self, model_data):
+        super().__init__()
+        self.daemon = True
+        self.model_data = model_data
+        self.viewer = None
 
     def run(self):
-        """运行应用"""
-        self.main_window.show()
-        return self.app.exec_()
+        try:
+            from core.viewer_3d import Viewer3D
+            self.viewer = Viewer3D()
+            self.viewer.load_model(self.model_data)
+            self.viewer.create_window(width=1024, height=768)
+            self.viewer.run()
+        except Exception as e:
+            print(f"Viewer error: {e}")
+            traceback.print_exc()
+
+
+class MainWindow(QMainWindow):
+    """主窗口"""
+
+    def __init__(self):
+        super().__init__()
+        self.model_loader = ModelLoader()
+        self.current_model = None
+        self.current_file_path = None
+        self.viewer_thread = None
+        self._setup_ui()
+
+    def _setup_ui(self):
+        """设置UI"""
+        self.setWindowTitle("3D Model Viewer")
+        self.setGeometry(100, 100, 1200, 800)
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QHBoxLayout(central)
+
+        left = QWidget()
+        left.setFixedWidth(340)
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(10, 10, 10, 10)
+        left_layout.setSpacing(15)
+
+        load_group = QGroupBox("Load Model")
+        load_layout = QVBoxLayout()
+        self.file_edit = QLineEdit()
+        self.file_edit.setPlaceholderText("Select a model file...")
+        browse_btn = QPushButton("Browse...")
+        browse_btn.clicked.connect(self._on_browse)
+        self.load_btn = QPushButton("Load Model")
+        self.load_btn.clicked.connect(self._on_load)
+        self.load_btn.setStyleSheet("QPushButton { padding: 8px; font-weight: bold; background-color: #2196F3; color: white; border-radius: 3px; } QPushButton:hover { background-color: #1976D2; }")
+        self.view_btn = QPushButton("View Model")
+        self.view_btn.clicked.connect(self._on_view)
+        self.view_btn.setEnabled(False)
+        self.view_btn.setStyleSheet("QPushButton { padding: 8px; font-weight: bold; background-color: #4CAF50; color: white; border-radius: 3px; } QPushButton:disabled { background-color: #ccc; color: #999; }")
+        self.clear_btn = QPushButton("Clear")
+        self.clear_btn.clicked.connect(self._on_clear)
+        self.clear_btn.setEnabled(False)
+        self.clear_btn.setStyleSheet("QPushButton { padding: 8px; background-color: #f44336; color: white; border-radius: 3px; } QPushButton:disabled { background-color: #ccc; }")
+
+        load_layout.addWidget(self.file_edit)
+        load_layout.addWidget(browse_btn)
+        load_layout.addWidget(self.load_btn)
+        load_layout.addWidget(self.view_btn)
+        load_layout.addWidget(self.clear_btn)
+        load_group.setLayout(load_layout)
+        left_layout.addWidget(load_group)
+
+        info_group = QGroupBox("Model Info")
+        info_layout = QVBoxLayout()
+        self.info_text = QTextEdit()
+        self.info_text.setReadOnly(True)
+        self.info_text.setStyleSheet("font-family: Consolas; font-size: 12px;")
+        self.info_text.setHtml("<i style='color: #999;'>No model loaded...</i>")
+        info_layout.addWidget(self.info_text)
+        info_group.setLayout(info_layout)
+        left_layout.addWidget(info_group)
+
+        help_group = QGroupBox("Controls")
+        help_layout = QVBoxLayout()
+        help_label = QLabel(
+            "<b>3D Viewer Controls:</b><br><br>"
+            "Left Drag: Rotate<br>"
+            "Right Drag: Pan<br>"
+            "Mouse Wheel: Zoom<br>"
+            "W: Toggle Wireframe<br>"
+            "A: Toggle Axes<br>"
+            "R: Reset View<br>"
+            "M: Measurement Mode<br>"
+            "C: Clear Measurement<br>"
+            "ESC: Close Viewer"
+        )
+        help_label.setWordWrap(True)
+        help_label.setStyleSheet("font-size: 12px; color: #555;")
+        help_layout.addWidget(help_label)
+        help_group.setLayout(help_layout)
+        left_layout.addWidget(help_group)
+
+        left_layout.addStretch()
+
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(10, 10, 10, 10)
+        right_layout.setSpacing(10)
+
+        viewer_box = QGroupBox("Viewer")
+        viewer_layout = QVBoxLayout()
+        placeholder = QLabel()
+        placeholder.setAlignment(Qt.AlignCenter)
+        placeholder.setStyleSheet(
+            "QLabel { background-color: #f5f5f5; border: 2px dashed #ccc; "
+            "border-radius: 5px; color: #888; font-size: 14px; }"
+        )
+        placeholder.setText(
+            "<html><center><h3>3D Model Viewer</h3>"
+            "<p>Load a model using the 'Load Model' button,<br>"
+            "then click 'View Model' to open the viewer window.<br><br>"
+            "<b>Supported formats:</b> PLY, OBJ, STL, GLTF, GLB</p></center></html>"
+        )
+        viewer_layout.addWidget(placeholder)
+        viewer_box.setLayout(viewer_layout)
+        right_layout.addWidget(viewer_box)
+
+        log_group = QGroupBox("Log")
+        log_layout = QVBoxLayout()
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setStyleSheet("font-family: Consolas; font-size: 12px; background-color: #fafafa;")
+        log_layout.addWidget(self.log_text)
+        log_group.setLayout(log_layout)
+        right_layout.addWidget(log_group)
+
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(left)
+        splitter.addWidget(right)
+        splitter.setSizes([340, 860])
+        layout.addWidget(splitter)
+
+    def _on_browse(self):
+        """浏览文件"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Open 3D Model", "",
+            "All Supported (*.ply *.obj *.stl *.gltf *.glb);;PLY Files (*.ply);;OBJ Files (*.obj);;STL Files (*.stl);;GLTF Files (*.gltf *.glb)"
+        )
+        if file_path:
+            self.file_edit.setText(file_path)
+
+    def _on_load(self):
+        """加载模型"""
+        file_path = self.file_edit.text().strip()
+        if not file_path:
+            QMessageBox.warning(self, "No File", "Please select a model file first.")
+            return
+        if not os.path.exists(file_path):
+            QMessageBox.warning(self, "File Not Found", f"File not found:\n{file_path}")
+            return
+
+        self._log(f"Loading: {file_path}")
+        try:
+            model = self.model_loader.load(file_path)
+
+            if model and model.vertices:
+                self.current_model = model
+                self.current_file_path = file_path
+                self.view_btn.setEnabled(True)
+                self.clear_btn.setEnabled(True)
+                self._update_info()
+                self._log(f"✓ Loaded: {len(model.vertices)} vertices, {len(model.triangles)} triangles")
+            else:
+                QMessageBox.warning(self, "Load Failed", "Failed to load model file.")
+                self._log("✗ Failed to load model")
+        except Exception as e:
+            self._log(f"✗ Error: {e}")
+            traceback.print_exc()
+            QMessageBox.critical(self, "Error", f"Failed to load:\n{e}")
+
+    def _on_view(self):
+        """打开查看器"""
+        if self.current_model is None:
+            return
+
+        self.viewer_thread = ViewerThread(self.current_model)
+        self.viewer_thread.start()
+        self._log("Viewer window opened")
+
+    def _on_clear(self):
+        """清除模型"""
+        self.current_model = None
+        self.current_file_path = None
+        self.view_btn.setEnabled(False)
+        self.clear_btn.setEnabled(False)
+        self.file_edit.clear()
+        self.info_text.setHtml("<i style='color: #999;'>No model loaded...</i>")
+        self._log("Model cleared")
+
+    def _update_info(self):
+        """更新信息面板"""
+        model = self.current_model
+        if model is None:
+            return
+
+        vertices = getattr(model, 'vertices', [])
+        triangles = getattr(model, 'triangles', [])
+        normals = getattr(model, 'normals', [])
+        colors = getattr(model, 'colors', None)
+        texcoords = getattr(model, 'texcoords', None)
+        texture_path = getattr(model, 'texture_path', '')
+        fmt = getattr(model, 'format', 'Unknown')
+
+        html_lines = []
+        html_lines.append("<b>=== Basic ===</b>")
+        html_lines.append(f"Format: {fmt}")
+        html_lines.append(f"Vertices: {len(vertices):,}")
+        html_lines.append(f"Triangles: {len(triangles):,}")
+        html_lines.append(f"Normals: {'Yes' if normals and len(normals) > 0 else 'No'}")
+        html_lines.append(f"Vertex Colors: {'Yes' if colors and len(colors) > 0 else 'No'}")
+        html_lines.append(f"Tex Coords: {'Yes' if texcoords and len(texcoords) > 0 else 'No'}")
+        html_lines.append(f"Texture: {os.path.basename(texture_path) if texture_path else 'None'}")
+
+        html_lines.append("")
+        html_lines.append("<b>=== Bounding Box ===</b>")
+        if vertices:
+            import numpy as np
+            verts = np.array(vertices)
+            bb_min = verts.min(axis=0)
+            bb_max = verts.max(axis=0)
+            bb_size = bb_max - bb_min
+            center = (bb_min + bb_max) / 2
+            html_lines.append(f"Min: ({bb_min[0]:.3f}, {bb_min[1]:.3f}, {bb_min[2]:.3f})")
+            html_lines.append(f"Max: ({bb_max[0]:.3f}, {bb_max[1]:.3f}, {bb_max[2]:.3f})")
+            html_lines.append(f"Size: ({bb_size[0]:.3f}, {bb_size[1]:.3f}, {bb_size[2]:.3f})")
+            html_lines.append(f"Center: ({center[0]:.3f}, {center[1]:.3f}, {center[2]:.3f})")
+
+        if self.current_file_path:
+            html_lines.append("")
+            html_lines.append("<b>=== File ===</b>")
+            html_lines.append(self.current_file_path)
+
+        html = "<html><body>"
+        for line in html_lines:
+            if line.startswith('<b>'):
+                html += f"<p style='margin: 5px 0;'>{line}</p>"
+            elif line == "":
+                html += "<br>"
+            else:
+                html += f"<p style='margin: 2px 0; font-family: monospace;'>{line}</p>"
+        html += "</body></html>"
+
+        self.info_text.setHtml(html)
+
+    def _log(self, message: str):
+        """添加日志"""
+        self.log_text.append(message)
 
 
 def main():
-    """主函数"""
-    try:
-        app = ModelViewerApp()
-        sys.exit(app.run())
-    except Exception as e:
-        print(f"Fatal error: {e}")
-        traceback.print_exc()
-        sys.exit(1)
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+    app.setApplicationName("3D Model Viewer")
+
+    window = MainWindow()
+    window.show()
+
+    sys.exit(app.exec_())
 
 
 if __name__ == "__main__":
