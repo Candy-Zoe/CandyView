@@ -5,72 +5,69 @@
 
 import numpy as np
 import cv2
+import subprocess
+import sys
+import json
+import base64
+import io
+from PIL import Image
 from scipy.ndimage import gaussian_filter, sobel
 from scipy import ndimage
-
-# 注意：torch/transformers 采用延迟导入，避免启动时DLL加载失败
-# 仅在实际调用_estimate_midas时才import torch
+import os
 
 
 class DepthEstimator:
     def __init__(self):
         self._device = None
-        self.midas_processor = None
-        self.midas_model = None
-        self._midas_available = None  # None=未检测, True/False=检测结果
+        self._midas_available = None
 
     def _check_midas_available(self):
-        """首次检测torch/transformers是否可用（仅执行一次，不加载模型）"""
+        """检测MiDaS是否可用（通过子进程测试）"""
         if self._midas_available is not None:
             return self._midas_available
+        
         try:
-            import sys
-            original_path = sys.path.copy()
-            import torch as _torch
-            sys.path[:] = original_path
-            from transformers import AutoImageProcessor, AutoModelForDepthEstimation
-            self._midas_available = True
-            print("[MiDaS] 检测成功")
-            return True
+            worker_path = os.path.join(os.path.dirname(__file__), 'midas_worker.py')
+            test_image = np.zeros((100, 100, 3), dtype=np.uint8)
+            _, buffer = cv2.imencode('.png', cv2.cvtColor(test_image, cv2.COLOR_RGB2BGR))
+            encoded = base64.b64encode(buffer).decode('utf-8')
+            
+            result = subprocess.run(
+                [sys.executable, worker_path, encoded],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            
+            if result.returncode == 0:
+                try:
+                    data = json.loads(result.stdout)
+                    if data.get('success'):
+                        self._midas_available = True
+                        print("[MiDaS] 检测成功")
+                        return True
+                except:
+                    pass
+            
+            print(f"[MiDaS] 检测失败: {result.stderr}")
+            self._midas_available = False
+            return False
         except Exception as e:
             print(f"[提示] 深度学习不可用: {e}")
             self._midas_available = False
             return False
 
-    def _init_midas(self):
-        """真正需要用MiDaS时才加载模型"""
-        if not self._check_midas_available():
-            return False
-        if self.midas_model is not None:
-            return True
-        try:
-            import torch as _torch
-            from transformers import AutoImageProcessor, AutoModelForDepthEstimation
-            self._device = 'cuda' if _torch.cuda.is_available() else 'cpu'
-            print(f"[MiDaS] 加载模型到 {self._device} ...")
-            self.midas_processor = AutoImageProcessor.from_pretrained("intel/dpt-hybrid-midas")
-            self.midas_model = AutoModelForDepthEstimation.from_pretrained("intel/dpt-hybrid-midas")
-            self.midas_model.to(self._device)
-            self.midas_model.eval()
-            return True
-        except Exception as e:
-            print(f"[MiDaS] 模型加载失败: {e}")
-            self.midas_processor = None
-            self.midas_model = None
-            self._midas_available = False
-            return False
-
     def has_midas(self):
-        """检查MiDaS是否可能可用（不触发模型加载）"""
+        """检查MiDaS是否可能可用"""
         return self._check_midas_available()
 
     def get_status_text(self):
         """返回可读的状态文本"""
-        if self._check_midas_available():
+        if self._midas_available is None:
+            return "ℹ 点击转换时会自动检测深度学习支持"
+        if self._midas_available:
             return "✓ MiDaS深度学习可用 (选择 auto 或 midas 算法启用)"
-        if self._midas_available is False:
-            return "⚠ 深度学习未启用，当前使用传统算法 (可 pip install torch transformers)"
-        return "ℹ 点击转换时会自动检测深度学习支持"
+        return "⚠ 深度学习未启用，当前使用传统算法"
 
     def estimate(self, image, method='auto', **kwargs):
         """
@@ -119,29 +116,33 @@ class DepthEstimator:
             return self._estimate_fusion(image, **kwargs)
 
     def _estimate_midas(self, image):
-        """使用MiDaS深度学习模型"""
-        if not self._init_midas():
+        """使用子进程运行MiDaS深度学习模型"""
+        if not self._check_midas_available():
             return self._estimate_fusion(image)
-
+        
         try:
-            import torch as _torch
-            input_tensor = self.midas_processor(
-                images=image, return_tensors="pt"
-            ).to(self._device)
-
-            with _torch.no_grad():
-                outputs = self.midas_model(**input_tensor)
-                predicted_depth = outputs.predicted_depth
-
-            depth = _torch.nn.functional.interpolate(
-                predicted_depth.unsqueeze(1),
-                size=image.shape[:2],
-                mode="bicubic",
-                align_corners=False,
-            ).squeeze().cpu().numpy()
-
-            depth = (depth - depth.min()) / (depth.max() - depth.min() + 1e-10)
-            return depth
+            worker_path = os.path.join(os.path.dirname(__file__), 'midas_worker.py')
+            
+            img_pil = Image.fromarray(image)
+            buffer = io.BytesIO()
+            img_pil.save(buffer, format='PNG')
+            encoded = base64.b64encode(buffer.getvalue()).decode('utf-8')
+            
+            result = subprocess.run(
+                [sys.executable, worker_path, encoded],
+                capture_output=True,
+                text=True,
+                timeout=120
+            )
+            
+            if result.returncode == 0:
+                data = json.loads(result.stdout)
+                if data.get('success'):
+                    depth = np.array(data['depth'])
+                    return depth
+            
+            print(f"[MiDaS] 推理失败，降级到传统算法: {result.stderr}")
+            return self._estimate_fusion(image)
         except Exception as e:
             print(f"[MiDaS] 推理失败，降级到传统算法: {e}")
             return self._estimate_fusion(image)
